@@ -1,0 +1,89 @@
+# Ebunode mobile builds. Ebunode's API starts these through the Codemagic API with the customer's
+# CLIENT_* variables (see scripts/configure.sh); nobody runs them by hand.
+#
+#   ebunode-android  →  signed .aab (Google Play) + .apk (direct install)
+#   ebunode-ios      →  signed .ipa; CLIENT_IOS_RELEASE=testflight uploads it to the customer's TestFlight,
+#                       app_store also submits it for App Store review
+#
+# Ebunode follows each build through a Codemagic webhook and the Codemagic API.
+
+definitions:
+  scripts:
+    - &configure
+      name: Configure the app
+      script: bash scripts/configure.sh "$CLIENT_PLATFORM"
+    - &packages
+      name: Get packages
+      script: flutter pub get
+    - &icons
+      name: Icon and splash screen
+      script: |
+        dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
+        dart run flutter_native_splash:create --path=flutter_native_splash.yaml
+
+workflows:
+  ebunode-android:
+    name: Ebunode Android
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      java: 17
+      vars:
+        CLIENT_PLATFORM: android
+    scripts:
+      - *configure
+      - *packages
+      - *icons
+      - name: Build app bundle and APK
+        script: |
+          flutter build appbundle --release \
+            --build-number="$CLIENT_VERSION_CODE" --build-name="$CLIENT_VERSION_NAME" \
+            --dart-define-from-file=build_config.json
+          flutter build apk --release \
+            --build-number="$CLIENT_VERSION_CODE" --build-name="$CLIENT_VERSION_NAME" \
+            --dart-define-from-file=build_config.json
+    artifacts:
+      - build/app/outputs/bundle/release/*.aab
+      - build/app/outputs/flutter-apk/app-release.apk
+
+  ebunode-ios:
+    name: Ebunode iOS
+    instance_type: mac_mini_m2
+    max_build_duration: 90
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      vars:
+        CLIENT_PLATFORM: ios
+        # Sent by Ebunode from the customer's App Store Connect API key:
+        #   APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
+        # and the account's distribution-certificate key (kept by Ebunode so every build reuses one certificate):
+        #   CERTIFICATE_PRIVATE_KEY
+    scripts:
+      - *configure
+      - *packages
+      - *icons
+      - name: Code signing
+        script: |
+          keychain initialize
+          # Registers the bundle id and creates the certificate and profile on first use, reuses them after
+          app-store-connect fetch-signing-files "$CLIENT_BUNDLE_ID" --type IOS_APP_STORE --create
+          keychain add-certificates
+          xcode-project use-profiles
+      - name: Build IPA
+        script: |
+          flutter build ipa --release \
+            --build-number="$CLIENT_VERSION_CODE" --build-name="$CLIENT_VERSION_NAME" \
+            --dart-define-from-file=build_config.json \
+            --export-options-plist=/Users/builder/export_options.plist
+      - name: Upload to App Store Connect
+        script: |
+          case "${CLIENT_IOS_RELEASE:-none}" in
+            testflight) app-store-connect publish --path build/ios/ipa/*.ipa ;;
+            app_store)  app-store-connect publish --path build/ios/ipa/*.ipa --app-store ;;
+            *)          echo "Build only — not uploading." ;;
+          esac
+    artifacts:
+      - build/ios/ipa/*.ipa
