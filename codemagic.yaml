@@ -5,7 +5,8 @@
 #   ebunode-ios      →  signed .ipa; CLIENT_IOS_RELEASE=testflight uploads it to the customer's TestFlight,
 #                       app_store also submits it for App Store review
 #
-# Ebunode follows each build through a Codemagic webhook and the Codemagic API.
+# At the end of every build Codemagic calls Ebunode's webhook (EBUNODE_WEBHOOK_URL); Ebunode also
+# checks running builds every minute.
 
 definitions:
   scripts:
@@ -20,6 +21,15 @@ definitions:
       script: |
         dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
         dart run flutter_native_splash:create --path=flutter_native_splash.yaml
+  publishing: &notify
+    scripts:
+      # Runs after every build, passed or failed: tells Ebunode to read the result from the Codemagic API
+      - name: Tell Ebunode the build is done
+        script: |
+          if [ -n "${EBUNODE_WEBHOOK_URL:-}" ]; then
+            curl -fsS -m 20 -X POST -H "Content-Type: application/json" \
+              -d "{\"buildId\": \"$CM_BUILD_ID\"}" "$EBUNODE_WEBHOOK_URL" || true
+          fi
 
 workflows:
   ebunode-android:
@@ -46,6 +56,7 @@ workflows:
     artifacts:
       - build/app/outputs/bundle/release/*.aab
       - build/app/outputs/flutter-apk/app-release.apk
+    publishing: *notify
 
   ebunode-ios:
     name: Ebunode iOS
@@ -87,3 +98,4 @@ workflows:
           esac
     artifacts:
       - build/ios/ipa/*.ipa
+    publishing: *notify
